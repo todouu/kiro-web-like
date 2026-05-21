@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  kiro-web:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - KIRO_API_KEY=${KIRO_API_KEY}
+      - APP_SECRET_KEY=${APP_SECRET_KEY}
+      - WORKSPACES_ROOT=/tmp/kiro-workspaces
+      - DATA_DIR=/app/data
+    volumes:
+      - workspace-data:/tmp/kiro-workspaces
+      - app-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  workspace-data:
+  app-data:

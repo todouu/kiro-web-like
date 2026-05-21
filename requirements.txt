@@ -1,0 +1,7 @@
+streamlit>=1.40.0
+streamlit-authenticator>=0.4.1
+pyyaml>=6.0
+python-dotenv>=1.0.0
+gitpython>=3.1.40
+psutil>=5.9.0
+bcrypt>=4.0.0
