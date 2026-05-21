@@ -2,8 +2,8 @@
 Kiro Web-Like: Main Streamlit Application
 
 A browser-based interface for interacting with Kiro CLI agents via ACP
-(Agent Client Protocol). Users select from pre-configured agents and
-chat within persistent multi-turn sessions.
+(Agent Client Protocol). Users select from pre-configured agents via a
+dropdown below the chat, and chat within persistent multi-turn sessions.
 
 Pages:
   - Chat (this file, main page)
@@ -153,62 +153,11 @@ def render_register_form():
 
 # --- Main Application ---
 def render_sidebar():
-    """Render the application sidebar with agent selection."""
+    """Render the application sidebar (user info + session controls)."""
     with st.sidebar:
         # User info
         st.markdown(f"### 👤 {st.session_state.user.display_name}")
         st.caption(f"@{st.session_state.username}")
-
-        st.markdown("---")
-
-        # Agent selection — read from real ~/.kiro/agents/
-        st.markdown("#### Select Agent")
-
-        workspace_path = None
-        if st.session_state.workspace:
-            workspace_path = st.session_state.workspace.path
-
-        agents = load_agents(workspace_path)
-
-        if not agents:
-            st.caption(
-                "No agents found.\n\n"
-                "Add agents to `~/.kiro/agents/` (JSON or .md files)."
-            )
-        else:
-            for agent in agents:
-                is_selected = st.session_state.selected_agent == agent.id
-                label = f"{agent.name}"
-                if agent.description:
-                    label += f" — {agent.description[:40]}"
-
-                if st.button(
-                    label,
-                    key=f"agent_{agent.id}",
-                    use_container_width=True,
-                    type="primary" if is_selected else "secondary",
-                ):
-                    if st.session_state.selected_agent != agent.id:
-                        st.session_state.selected_agent = agent.id
-                        # Close current ACP session when switching agents
-                        conn = acp_client.get_connection(st.session_state.username)
-                        if conn:
-                            acp_client.close_session(conn)
-                        st.session_state.messages = []
-                        st.session_state.acp_connected = False
-                        st.rerun()
-
-            # Show selected agent info
-            if st.session_state.selected_agent:
-                selected = get_agent(st.session_state.selected_agent, workspace_path)
-                if selected:
-                    st.markdown("---")
-                    st.caption(f"**{selected.name}**")
-                    if selected.description:
-                        st.caption(selected.description)
-                    if selected.tools:
-                        st.caption(f"Tools: `{'`, `'.join(selected.tools)}`")
-                    st.caption(f"Scope: {selected.scope}")
 
         st.markdown("---")
 
@@ -224,6 +173,15 @@ def render_sidebar():
         }
         icon, label = status_map.get(status, ("⚪", "Unknown"))
         st.markdown(f"**Status:** {icon} {label}")
+
+        # Show selected agent info
+        if st.session_state.selected_agent:
+            workspace_path = st.session_state.workspace.path if st.session_state.workspace else None
+            selected = get_agent(st.session_state.selected_agent, workspace_path)
+            if selected:
+                st.caption(f"Agent: **{selected.name}**")
+                if selected.description:
+                    st.caption(selected.description)
 
         st.markdown("---")
 
@@ -257,18 +215,8 @@ def render_sidebar():
 
 
 def render_chat():
-    """Render the main chat interface."""
-    # Header
-    selected_agent = None
-    if st.session_state.selected_agent:
-        workspace_path = st.session_state.workspace.path if st.session_state.workspace else None
-        selected_agent = get_agent(st.session_state.selected_agent, workspace_path)
-
-    if selected_agent:
-        st.markdown(f"### 🤖 {selected_agent.name}")
-    else:
-        st.markdown("### 🤖 Kiro Agent")
-        st.caption("Select an agent from the sidebar to get started.")
+    """Render the main chat interface with agent dropdown below."""
+    st.markdown("### 🤖 Kiro Agent")
 
     if not config.kiro_api_key:
         st.warning(
@@ -300,6 +248,52 @@ def render_chat():
 
         st.session_state.messages.append({"role": "assistant", "content": response})
         st.rerun()
+
+    # --- Agent selector dropdown below the chat ---
+    st.markdown("---")
+
+    workspace_path = None
+    if st.session_state.workspace:
+        workspace_path = st.session_state.workspace.path
+
+    agents = load_agents(workspace_path)
+
+    if not agents:
+        st.caption(
+            "No agents found. Add agent files to `~/.kiro/agents/` (JSON or .md)."
+        )
+    else:
+        # Build options: id -> display name
+        agent_options = {a.id: a.name for a in agents}
+        agent_ids = list(agent_options.keys())
+        agent_labels = list(agent_options.values())
+
+        # Determine current selection index
+        current_index = 0
+        if st.session_state.selected_agent and st.session_state.selected_agent in agent_ids:
+            current_index = agent_ids.index(st.session_state.selected_agent)
+
+        selected_label = st.selectbox(
+            "Agent",
+            options=agent_labels,
+            index=current_index,
+            key="agent_dropdown",
+        )
+
+        # Map back to agent id
+        selected_idx = agent_labels.index(selected_label)
+        new_agent_id = agent_ids[selected_idx]
+
+        # Handle agent change
+        if new_agent_id != st.session_state.selected_agent:
+            st.session_state.selected_agent = new_agent_id
+            # Close current ACP session when switching agents
+            conn = acp_client.get_connection(st.session_state.username)
+            if conn:
+                acp_client.close_session(conn)
+            st.session_state.messages = []
+            st.session_state.acp_connected = False
+            st.rerun()
 
 
 def ensure_acp_connection():
