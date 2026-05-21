@@ -15,7 +15,7 @@ class Config:
 
     # Kiro CLI
     kiro_api_key: str = field(default_factory=lambda: os.getenv("KIRO_API_KEY", ""))
-    kiro_cli_path: str = field(default_factory=lambda: os.getenv("KIRO_CLI_PATH", "kiro"))
+    kiro_cli_path: str = field(default_factory=lambda: os.getenv("KIRO_CLI_PATH", "kiro-cli"))
 
     # Paths
     workspaces_root: Path = field(
