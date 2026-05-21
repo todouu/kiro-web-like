@@ -1,15 +1,16 @@
 """
 Kiro Web-Like: Main Streamlit Application
 
-A browser-based interface for interacting with Kiro CLI agents,
-featuring per-user isolated workspaces and independent sessions.
+A browser-based interface for interacting with Kiro CLI agents via ACP
+(Agent Client Protocol), featuring per-user isolated workspaces and
+persistent multi-turn conversation sessions.
 """
 
 import time
 
 import streamlit as st
 
-from src.agent import AgentManager, AgentMode, AgentStatus, agent_manager
+from src.agent import ACPClient, AgentStatus, acp_client
 from src.auth import AuthManager, Session
 from src.config import config
 from src.workspace import WorkspaceManager
@@ -83,7 +84,7 @@ def init_session_state():
         "session": None,
         "workspace": None,
         "messages": [],
-        "agent_process_id": None,
+        "acp_connected": False,
         "mode": "vibe",
         "repos": [],
         "show_register": False,
@@ -243,35 +244,40 @@ def render_sidebar():
 
         st.markdown("---")
 
-        # Session info
+        # Session & Agent info
         st.markdown("#### Session")
         if st.session_state.session:
             st.caption(f"ID: `{st.session_state.session.session_id[:8]}...`")
 
-        # Agent status
-        if st.session_state.agent_process_id:
-            status = agent_manager.get_status(st.session_state.agent_process_id)
-            status_color = {
-                AgentStatus.RUNNING: "🟢",
-                AgentStatus.IDLE: "🔵",
-                AgentStatus.STOPPED: "🔴",
-                AgentStatus.ERROR: "🟠",
-            }
-            st.markdown(f"Agent: {status_color.get(status, '⚪')} {status.value}")
+        # Agent status from ACP
+        username = st.session_state.username
+        status = acp_client.get_status(username)
+        status_display = {
+            AgentStatus.RUNNING: ("🟢", "Running"),
+            AgentStatus.IDLE: ("🔵", "Connected"),
+            AgentStatus.INITIALIZING: ("🟡", "Connecting..."),
+            AgentStatus.STOPPED: ("🔴", "Disconnected"),
+            AgentStatus.ERROR: ("🟠", "Error"),
+        }
+        icon, label = status_display.get(status, ("⚪", "Unknown"))
+        st.markdown(f"Agent: {icon} {label}")
 
         st.markdown("---")
 
         # Actions
         if st.button("🗑️ Clear Chat", use_container_width=True):
+            # Close ACP session and start fresh
+            conn = acp_client.get_connection(username)
+            if conn:
+                acp_client.close_session(conn)
             st.session_state.messages = []
+            st.session_state.acp_connected = False
             st.rerun()
 
         if st.button("🔄 New Session", use_container_width=True):
-            # Stop any running agent
-            if st.session_state.agent_process_id:
-                agent_manager.stop_agent(st.session_state.agent_process_id)
+            # Disconnect ACP and create a new workspace session
+            acp_client.disconnect(username)
 
-            # Create new session and workspace
             session = auth_manager.create_session(st.session_state.username)
             workspace = workspace_manager.create_workspace(
                 st.session_state.username, session.session_id
@@ -280,13 +286,12 @@ def render_sidebar():
             st.session_state.workspace = workspace
             st.session_state.messages = []
             st.session_state.repos = []
-            st.session_state.agent_process_id = None
+            st.session_state.acp_connected = False
             st.rerun()
 
         if st.button("🚪 Sign Out", use_container_width=True):
-            # Cleanup
-            if st.session_state.agent_process_id:
-                agent_manager.stop_agent(st.session_state.agent_process_id)
+            # Full cleanup
+            acp_client.disconnect(username)
 
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
@@ -325,7 +330,7 @@ def render_chat():
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Send to agent
+        # Send to agent via ACP
         with st.chat_message("assistant", avatar="🤖"):
             with st.spinner("Kiro is thinking..."):
                 response = execute_agent_prompt(prompt)
@@ -335,8 +340,34 @@ def render_chat():
         st.rerun()
 
 
+def ensure_acp_connection():
+    """Ensure the ACP connection is established for the current user."""
+    username = st.session_state.username
+    workspace_path = st.session_state.workspace.path
+
+    # Check if already connected
+    conn = acp_client.get_connection(username)
+    if conn and conn.status in (AgentStatus.IDLE, AgentStatus.RUNNING):
+        return conn
+
+    # Connect (spawns kiro-cli acp + initialize handshake)
+    conn = acp_client.connect(username, workspace_path)
+
+    # Create a new ACP session for conversation
+    acp_client.new_session(conn)
+    st.session_state.acp_connected = True
+
+    return conn
+
+
 def execute_agent_prompt(prompt: str) -> str:
-    """Execute a prompt via the Kiro CLI agent."""
+    """
+    Execute a prompt via Kiro CLI ACP protocol.
+
+    Unlike headless mode, ACP maintains conversation context automatically.
+    Each message is sent within the same session, so the agent remembers
+    previous messages without us having to re-send history.
+    """
     if not config.kiro_api_key:
         return (
             "⚠️ **Agent not configured.**\n\n"
@@ -349,70 +380,49 @@ def execute_agent_prompt(prompt: str) -> str:
     if not st.session_state.workspace:
         return "❌ No workspace available. Please create a new session."
 
-    workspace_path = st.session_state.workspace.path
-    mode = AgentMode(st.session_state.mode)
+    try:
+        # Ensure ACP connection is live
+        conn = ensure_acp_connection()
 
-    # Start or reuse agent process
-    agent = agent_manager.start_agent(
-        username=st.session_state.username,
-        session_id=st.session_state.session.session_id,
-        workspace_path=workspace_path,
-        prompt=prompt,
-        mode=mode,
-    )
+        # Send prompt — ACP keeps multi-turn context server-side
+        response = acp_client.prompt(conn, prompt)
+        return response
 
-    st.session_state.agent_process_id = agent.process_id
+    except FileNotFoundError as e:
+        return (
+            f"❌ **Kiro CLI not found**\n\n"
+            f"{e}\n\n"
+            f"Install it from: https://kiro.dev/cli/\n\n"
+            f"Or set `KIRO_CLI_PATH` in `.env` if it's in a custom location."
+        )
 
-    # If agent errored immediately (e.g. CLI not found), show error message
-    if agent.status == AgentStatus.ERROR:
-        if agent.messages:
-            return agent.messages[-1].content
-        return "❌ Agent encountered an error during startup."
+    except ConnectionError as e:
+        st.session_state.acp_connected = False
+        return (
+            f"❌ **Connection lost to Kiro agent**\n\n"
+            f"{e}\n\n"
+            f"The agent process may have crashed. Try sending another message to reconnect."
+        )
 
-    # Wait for output (with timeout)
-    output_lines = []
-    timeout = 120  # 2 minutes max
-    start_time = time.time()
+    except TimeoutError:
+        return (
+            "⏳ **Agent timed out**\n\n"
+            "The agent took too long to respond (>3 min). "
+            "Try a simpler prompt or check your network connection."
+        )
 
-    while time.time() - start_time < timeout:
-        new_lines = agent_manager.get_output(agent.process_id)
-        if new_lines:
-            output_lines.extend(new_lines)
+    except RuntimeError as e:
+        return (
+            f"❌ **Agent error**\n\n"
+            f"{e}\n\n"
+            f"**Troubleshooting:**\n"
+            f"- Check that `KIRO_API_KEY` is valid and not expired\n"
+            f"- Ensure Kiro CLI is v1.25+ (ACP support required)\n"
+            f"- Test manually: `kiro-cli acp` (should start and wait for JSON-RPC input)\n"
+        )
 
-        status = agent_manager.get_status(agent.process_id)
-        if status in (AgentStatus.STOPPED, AgentStatus.ERROR):
-            # Get any remaining output
-            time.sleep(0.3)  # Brief pause to allow final output to flush
-            remaining = agent_manager.get_output(agent.process_id)
-            output_lines.extend(remaining)
-            break
-
-        time.sleep(0.5)
-
-    if not output_lines:
-        # Try to get exit code for better diagnostics
-        exit_code = None
-        if agent._process:
-            exit_code = agent._process.poll()
-
-        if exit_code is not None and exit_code != 0:
-            return (
-                f"❌ Kiro CLI exited with code {exit_code}.\n\n"
-                f"**Possible causes:**\n"
-                f"- Invalid or expired `KIRO_API_KEY`\n"
-                f"- Kiro CLI version mismatch (need v2.0+ for headless mode)\n"
-                f"- Network connectivity issues\n\n"
-                f"**Debug command:**\n"
-                f"```bash\n"
-                f"KIRO_API_KEY=your_key kiro --no-interactive --trust-all-tools --prompt \"hi\"\n"
-                f"```"
-            )
-        elif agent.status == AgentStatus.ERROR:
-            return "❌ Agent encountered an error. Check Kiro CLI installation and API key."
-
-        return "⏳ Agent is still processing. Results will appear shortly..."
-
-    return "\n".join(output_lines)
+    except Exception as e:
+        return f"❌ Unexpected error: {type(e).__name__}: {e}"
 
 
 def render_workspace_panel():

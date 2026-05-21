@@ -1,24 +1,28 @@
-"""Kiro CLI agent process manager.
+"""Kiro CLI ACP (Agent Client Protocol) client.
 
-Manages spawning, communication, and lifecycle of Kiro CLI headless processes
-for each user session.
+Uses JSON-RPC 2.0 over stdin/stdout to communicate with `kiro-cli acp`,
+enabling persistent multi-turn conversations within a session.
+
+ACP lifecycle:
+    initialize → session/new → session/prompt (repeatable) → session/close
 """
 
-import asyncio
 import json
+import logging
 import os
-import signal
+import shutil
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from queue import Queue
-
-import psutil
+from queue import Empty, Queue
+from typing import Any
 
 from src.config import config
+
+logger = logging.getLogger(__name__)
 
 
 class AgentMode(str, Enum):
@@ -28,6 +32,7 @@ class AgentMode(str, Enum):
 
 class AgentStatus(str, Enum):
     IDLE = "idle"
+    INITIALIZING = "initializing"
     RUNNING = "running"
     STOPPED = "stopped"
     ERROR = "error"
@@ -44,299 +49,404 @@ class AgentMessage:
 
 
 @dataclass
-class AgentProcess:
-    """Tracks a running Kiro CLI agent process."""
+class ACPConnection:
+    """Represents a live connection to a kiro-cli acp process."""
 
-    process_id: str
+    process: subprocess.Popen
     username: str
-    session_id: str
     workspace_path: Path
-    mode: AgentMode
-    status: AgentStatus = AgentStatus.IDLE
-    pid: int | None = None
+    session_id: str | None = None  # ACP session ID (from session/new response)
+    status: AgentStatus = AgentStatus.INITIALIZING
     messages: list[AgentMessage] = field(default_factory=list)
-    created_at: float = field(default_factory=time.time)
-    _process: subprocess.Popen | None = field(default=None, repr=False)
-    _output_queue: Queue = field(default_factory=Queue, repr=False)
+    _request_id: int = field(default=0, repr=False)
+    _response_queue: Queue = field(default_factory=Queue, repr=False)
+    _notification_queue: Queue = field(default_factory=Queue, repr=False)
     _reader_thread: threading.Thread | None = field(default=None, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    created_at: float = field(default_factory=time.time)
+
+    def next_id(self) -> int:
+        with self._lock:
+            self._request_id += 1
+            return self._request_id
 
 
-class AgentManager:
-    """Manages Kiro CLI agent processes for all user sessions."""
+class ACPClient:
+    """
+    Manages Kiro CLI ACP processes.
+
+    Each user gets a persistent `kiro-cli acp` subprocess.
+    Multiple conversation sessions can be created within one process.
+    """
 
     def __init__(self):
-        self._processes: dict[str, AgentProcess] = {}
+        self._connections: dict[str, ACPConnection] = {}  # key: username
         self._lock = threading.Lock()
 
-    def _build_kiro_command(
-        self,
-        prompt: str,
-        workspace_path: Path,
-        mode: AgentMode,
-        trust_all_tools: bool = True,
-    ) -> list[str]:
-        """Build the kiro CLI command for headless execution."""
-        cmd = [
-            config.kiro_cli_path,
-            "--no-interactive",
-        ]
-
-        if trust_all_tools:
-            cmd.append("--trust-all-tools")
-
-        # Add prompt
-        cmd.extend(["--prompt", prompt])
-
-        return cmd
-
     def _get_env(self) -> dict:
-        """Get environment variables for the Kiro process."""
+        """Environment variables for the kiro-cli acp process."""
         env = os.environ.copy()
         env["KIRO_API_KEY"] = config.kiro_api_key
-        # Disable any interactive features
         env["TERM"] = "dumb"
         env["NO_COLOR"] = "1"
         return env
 
-    def _read_output(self, agent: AgentProcess):
-        """Background thread to read process stdout."""
-        if agent._process and agent._process.stdout:
+    def _reader_loop(self, conn: ACPConnection):
+        """Background thread: read newline-delimited JSON-RPC messages from stdout."""
+        try:
+            for raw_line in iter(conn.process.stdout.readline, ""):
+                line = raw_line.strip()
+                if not line:
+                    continue
+
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning(f"Non-JSON output from kiro-cli acp: {line[:200]}")
+                    continue
+
+                # JSON-RPC response (has "id")
+                if "id" in msg and ("result" in msg or "error" in msg):
+                    conn._response_queue.put(msg)
+                # JSON-RPC notification (no "id", has "method")
+                elif "method" in msg:
+                    conn._notification_queue.put(msg)
+                else:
+                    logger.debug(f"Unknown ACP message: {msg}")
+
+        except (ValueError, OSError):
+            pass  # Process closed
+        finally:
+            conn.status = AgentStatus.STOPPED
+
+    def _send_request(self, conn: ACPConnection, method: str, params: dict | None = None) -> dict:
+        """Send a JSON-RPC request and wait for the response."""
+        request_id = conn.next_id()
+        request = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+        }
+        if params is not None:
+            request["params"] = params
+
+        raw = json.dumps(request) + "\n"
+
+        try:
+            conn.process.stdin.write(raw)
+            conn.process.stdin.flush()
+        except (OSError, BrokenPipeError) as e:
+            conn.status = AgentStatus.ERROR
+            raise ConnectionError(f"Failed to send to kiro-cli acp: {e}")
+
+        # Wait for matching response (timeout 120s)
+        deadline = time.time() + 120
+        while time.time() < deadline:
             try:
-                for line in iter(agent._process.stdout.readline, ""):
-                    if line:
-                        agent._output_queue.put(line.rstrip("\n"))
-                    if agent._process.poll() is not None:
+                resp = conn._response_queue.get(timeout=1.0)
+                if resp.get("id") == request_id:
+                    if "error" in resp:
+                        raise RuntimeError(
+                            f"ACP error ({resp['error'].get('code', '?')}): "
+                            f"{resp['error'].get('message', 'unknown')}"
+                        )
+                    return resp.get("result", {})
+                else:
+                    # Not our response — put it back (rare edge case)
+                    conn._response_queue.put(resp)
+            except Empty:
+                # Check if process died
+                if conn.process.poll() is not None:
+                    conn.status = AgentStatus.ERROR
+                    raise ConnectionError(
+                        f"kiro-cli acp process exited with code {conn.process.returncode}"
+                    )
+                continue
+
+        raise TimeoutError("Timed out waiting for ACP response")
+
+    def _send_notification(self, conn: ACPConnection, method: str, params: dict | None = None):
+        """Send a JSON-RPC notification (no response expected)."""
+        notification = {
+            "jsonrpc": "2.0",
+            "method": method,
+        }
+        if params is not None:
+            notification["params"] = params
+
+        raw = json.dumps(notification) + "\n"
+        try:
+            conn.process.stdin.write(raw)
+            conn.process.stdin.flush()
+        except (OSError, BrokenPipeError):
+            pass
+
+    def _collect_streaming_response(self, conn: ACPConnection, timeout: float = 120) -> str:
+        """
+        After sending session/prompt, collect streaming session/update notifications
+        until we get a prompt_done event or timeout.
+        """
+        output_parts = []
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            try:
+                notification = conn._notification_queue.get(timeout=1.0)
+                method = notification.get("method", "")
+                params = notification.get("params", {})
+
+                if method == "session/update":
+                    # Extract text content from the update
+                    content_blocks = params.get("content", [])
+                    for block in content_blocks:
+                        if block.get("type") == "text":
+                            output_parts.append(block.get("text", ""))
+                        elif block.get("type") == "tool_use":
+                            tool_name = block.get("name", "unknown")
+                            output_parts.append(f"\n🔧 *Using tool: {tool_name}*\n")
+                        elif block.get("type") == "tool_result":
+                            pass  # Usually internal
+
+                    # Check if this is the end of the turn
+                    if params.get("done") or params.get("event") == "prompt_done":
                         break
-            except (ValueError, OSError):
-                pass  # Process closed
 
-    def start_agent(
-        self,
-        username: str,
-        session_id: str,
-        workspace_path: Path,
-        prompt: str,
-        mode: AgentMode = AgentMode.VIBE,
-    ) -> AgentProcess:
-        """Start a new Kiro CLI agent process for a user session."""
-        process_id = f"{username}-{session_id}"
+                elif method == "session/event":
+                    event_type = params.get("event", "")
+                    if event_type in ("prompt_done", "end_turn"):
+                        break
 
-        # Stop existing process if any
-        if process_id in self._processes:
-            self.stop_agent(process_id)
+            except Empty:
+                # Check if process died
+                if conn.process.poll() is not None:
+                    break
+                continue
 
-        cmd = self._build_kiro_command(prompt, workspace_path, mode)
+        # Also check response queue for the prompt response
+        try:
+            resp = conn._response_queue.get_nowait()
+            if "result" in resp:
+                result = resp["result"]
+                content_blocks = result.get("content", [])
+                for block in content_blocks:
+                    if block.get("type") == "text":
+                        output_parts.append(block.get("text", ""))
+        except Empty:
+            pass
+
+        return "".join(output_parts)
+
+    def connect(self, username: str, workspace_path: Path) -> ACPConnection:
+        """
+        Start a kiro-cli acp process for a user and perform initialization.
+        Reuses existing connection if alive.
+        """
+        with self._lock:
+            existing = self._connections.get(username)
+            if existing and existing.process.poll() is None:
+                return existing
+
+        # Verify kiro CLI exists
+        kiro_path = shutil.which(config.kiro_cli_path)
+        if not kiro_path:
+            raise FileNotFoundError(
+                f"'{config.kiro_cli_path}' not found in PATH. "
+                f"Install Kiro CLI: https://kiro.dev/cli/"
+            )
+
+        cmd = [config.kiro_cli_path, "acp"]
         env = self._get_env()
 
         try:
-            # Verify kiro CLI exists before spawning
-            import shutil
-            kiro_path = shutil.which(config.kiro_cli_path)
-            if not kiro_path:
-                raise FileNotFoundError(
-                    f"'{config.kiro_cli_path}' not found in PATH. "
-                    f"PATH={env.get('PATH', 'not set')}"
-                )
-
             process = subprocess.Popen(
                 cmd,
                 cwd=str(workspace_path),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
                 stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                env=env,
                 bufsize=1,
+                env=env,
             )
-
-            agent = AgentProcess(
-                process_id=process_id,
-                username=username,
-                session_id=session_id,
-                workspace_path=workspace_path,
-                mode=mode,
-                status=AgentStatus.RUNNING,
-                pid=process.pid,
-                _process=process,
-            )
-
-            # Add the user message
-            agent.messages.append(AgentMessage(role="user", content=prompt))
-
-            # Start output reader thread
-            reader = threading.Thread(target=self._read_output, args=(agent,), daemon=True)
-            reader.start()
-            agent._reader_thread = reader
-
-            with self._lock:
-                self._processes[process_id] = agent
-
-            return agent
-
-        except FileNotFoundError as e:
-            agent = AgentProcess(
-                process_id=process_id,
-                username=username,
-                session_id=session_id,
-                workspace_path=workspace_path,
-                mode=mode,
-                status=AgentStatus.ERROR,
-            )
-            agent.messages.append(
-                AgentMessage(
-                    role="assistant",
-                    content=f"Error: Kiro CLI not found.\n\nDetails: {e}\n\n"
-                    f"Please ensure 'kiro' is installed and available in PATH.\n"
-                    f"Set KIRO_CLI_PATH in .env if it's in a custom location.",
-                )
-            )
-            with self._lock:
-                self._processes[process_id] = agent
-            return agent
-
-        except PermissionError as e:
-            agent = AgentProcess(
-                process_id=process_id,
-                username=username,
-                session_id=session_id,
-                workspace_path=workspace_path,
-                mode=mode,
-                status=AgentStatus.ERROR,
-            )
-            agent.messages.append(
-                AgentMessage(
-                    role="assistant",
-                    content=f"Error: Permission denied when running Kiro CLI.\n\nDetails: {e}\n\n"
-                    f"Try: `chmod +x $(which kiro)`",
-                )
-            )
-            with self._lock:
-                self._processes[process_id] = agent
-            return agent
-
         except Exception as e:
-            agent = AgentProcess(
-                process_id=process_id,
-                username=username,
-                session_id=session_id,
-                workspace_path=workspace_path,
-                mode=mode,
-                status=AgentStatus.ERROR,
+            raise RuntimeError(f"Failed to start kiro-cli acp: {e}")
+
+        conn = ACPConnection(
+            process=process,
+            username=username,
+            workspace_path=workspace_path,
+        )
+
+        # Start reader thread
+        reader = threading.Thread(target=self._reader_loop, args=(conn,), daemon=True)
+        reader.start()
+        conn._reader_thread = reader
+
+        # Give the process a moment to start
+        time.sleep(0.5)
+
+        # Check if process died immediately
+        if process.poll() is not None:
+            stderr_output = process.stderr.read() if process.stderr else ""
+            raise RuntimeError(
+                f"kiro-cli acp exited immediately (code {process.returncode}).\n"
+                f"stderr: {stderr_output[:500]}"
             )
-            agent.messages.append(
-                AgentMessage(
-                    role="assistant",
-                    content=f"Error starting Kiro CLI agent.\n\nDetails: {type(e).__name__}: {e}\n\n"
-                    f"Command: `{' '.join(cmd)}`\n"
-                    f"Workspace: `{workspace_path}`",
-                )
-            )
-            with self._lock:
-                self._processes[process_id] = agent
-            return agent
 
-    def send_message(self, process_id: str, message: str) -> bool:
-        """Send a message/prompt to a running agent process via stdin."""
-        with self._lock:
-            agent = self._processes.get(process_id)
-
-        if not agent or not agent._process or agent._process.poll() is not None:
-            return False
-
+        # Send initialize handshake
         try:
-            agent._process.stdin.write(message + "\n")
-            agent._process.stdin.flush()
-            agent.messages.append(AgentMessage(role="user", content=message))
-            return True
-        except (OSError, BrokenPipeError):
-            agent.status = AgentStatus.ERROR
-            return False
+            init_result = self._send_request(conn, "initialize", {
+                "protocolVersion": "0.1",
+                "clientInfo": {
+                    "name": "kiro-web-like",
+                    "version": "0.1.0",
+                },
+                "capabilities": {},
+            })
+            logger.info(f"ACP initialized for {username}: {init_result}")
+            conn.status = AgentStatus.IDLE
+        except Exception as e:
+            self._kill(conn)
+            raise RuntimeError(f"ACP initialization failed: {e}")
 
-    def get_output(self, process_id: str) -> list[str]:
-        """Get any new output from the agent process."""
         with self._lock:
-            agent = self._processes.get(process_id)
+            self._connections[username] = conn
 
-        if not agent:
-            return []
+        return conn
 
-        lines = []
-        while not agent._output_queue.empty():
+    def new_session(self, conn: ACPConnection) -> str:
+        """Create a new ACP conversation session. Returns session_id."""
+        result = self._send_request(conn, "session/new", {
+            "workspace": str(conn.workspace_path),
+        })
+        session_id = result.get("sessionId", result.get("session_id", ""))
+        conn.session_id = session_id
+        conn.messages = []
+        logger.info(f"New ACP session: {session_id}")
+        return session_id
+
+    def prompt(self, conn: ACPConnection, message: str) -> str:
+        """
+        Send a user prompt within the current session.
+        Returns the agent's response text.
+        Multi-turn context is maintained by the ACP server automatically.
+        """
+        if not conn.session_id:
+            self.new_session(conn)
+
+        conn.status = AgentStatus.RUNNING
+        conn.messages.append(AgentMessage(role="user", content=message))
+
+        # Send session/prompt request
+        request_id = conn.next_id()
+        request = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "session/prompt",
+            "params": {
+                "sessionId": conn.session_id,
+                "content": [
+                    {"type": "text", "text": message}
+                ],
+            },
+        }
+
+        raw = json.dumps(request) + "\n"
+        try:
+            conn.process.stdin.write(raw)
+            conn.process.stdin.flush()
+        except (OSError, BrokenPipeError) as e:
+            conn.status = AgentStatus.ERROR
+            raise ConnectionError(f"Failed to send prompt: {e}")
+
+        # Collect streaming response
+        response_text = self._collect_streaming_response(conn, timeout=180)
+
+        # Also try to get the final RPC response
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                try:
+                    resp = conn._response_queue.get(timeout=1.0)
+                    if resp.get("id") == request_id:
+                        if "error" in resp:
+                            error_msg = resp["error"].get("message", "Unknown error")
+                            conn.status = AgentStatus.IDLE
+                            return f"❌ Agent error: {error_msg}"
+                        # Extract content from final response if we didn't get it streaming
+                        if not response_text and "result" in resp:
+                            result = resp["result"]
+                            content_blocks = result.get("content", [])
+                            for block in content_blocks:
+                                if block.get("type") == "text":
+                                    response_text += block.get("text", "")
+                        break
+                    else:
+                        conn._response_queue.put(resp)
+                except Empty:
+                    break
+        except Exception:
+            pass
+
+        conn.status = AgentStatus.IDLE
+
+        if not response_text:
+            response_text = "*(Agent completed but produced no text output)*"
+
+        conn.messages.append(AgentMessage(role="assistant", content=response_text))
+        return response_text
+
+    def close_session(self, conn: ACPConnection):
+        """Close the current ACP session (but keep the process alive)."""
+        if conn.session_id:
             try:
-                lines.append(agent._output_queue.get_nowait())
+                self._send_notification(conn, "session/close", {
+                    "sessionId": conn.session_id,
+                })
             except Exception:
-                break
+                pass
+            conn.session_id = None
+            conn.messages = []
 
-        # Check if process has finished
-        if agent._process and agent._process.poll() is not None:
-            agent.status = AgentStatus.STOPPED
-
-        # Combine output into assistant message
-        if lines:
-            combined = "\n".join(lines)
-            agent.messages.append(AgentMessage(role="assistant", content=combined))
-
-        return lines
-
-    def get_status(self, process_id: str) -> AgentStatus:
-        """Get the current status of an agent process."""
+    def disconnect(self, username: str):
+        """Stop the ACP process for a user."""
         with self._lock:
-            agent = self._processes.get(process_id)
+            conn = self._connections.pop(username, None)
+        if conn:
+            self._kill(conn)
 
-        if not agent:
-            return AgentStatus.STOPPED
-
-        if agent._process and agent._process.poll() is not None:
-            agent.status = AgentStatus.STOPPED
-
-        return agent.status
-
-    def get_messages(self, process_id: str) -> list[AgentMessage]:
-        """Get all messages for an agent process."""
-        with self._lock:
-            agent = self._processes.get(process_id)
-        return agent.messages if agent else []
-
-    def stop_agent(self, process_id: str) -> bool:
-        """Stop a running agent process."""
-        with self._lock:
-            agent = self._processes.get(process_id)
-
-        if not agent or not agent._process:
-            return False
-
+    def _kill(self, conn: ACPConnection):
+        """Terminate an ACP process."""
         try:
-            # Try graceful shutdown first
-            agent._process.terminate()
+            conn.process.terminate()
             try:
-                agent._process.wait(timeout=5)
+                conn.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                agent._process.kill()
-                agent._process.wait(timeout=3)
+                conn.process.kill()
+                conn.process.wait(timeout=3)
+        except (OSError, ProcessLookupError):
+            pass
+        conn.status = AgentStatus.STOPPED
 
-            agent.status = AgentStatus.STOPPED
-            return True
-        except (OSError, psutil.Error):
-            agent.status = AgentStatus.ERROR
-            return False
-
-    def cleanup_user_processes(self, username: str):
-        """Stop all processes for a user."""
+    def get_connection(self, username: str) -> ACPConnection | None:
+        """Get existing connection for a user."""
         with self._lock:
-            user_processes = [
-                pid for pid, agent in self._processes.items() if agent.username == username
-            ]
+            conn = self._connections.get(username)
+        if conn and conn.process.poll() is not None:
+            conn.status = AgentStatus.STOPPED
+            return None
+        return conn
 
-        for pid in user_processes:
-            self.stop_agent(pid)
+    def get_messages(self, username: str) -> list[AgentMessage]:
+        """Get conversation history for a user's current session."""
+        conn = self.get_connection(username)
+        return conn.messages if conn else []
 
-    def list_user_processes(self, username: str) -> list[AgentProcess]:
-        """List all agent processes for a user."""
-        with self._lock:
-            return [
-                agent for agent in self._processes.values() if agent.username == username
-            ]
+    def get_status(self, username: str) -> AgentStatus:
+        """Get agent status for a user."""
+        conn = self.get_connection(username)
+        return conn.status if conn else AgentStatus.STOPPED
 
 
-# Global agent manager instance
-agent_manager = AgentManager()
+# Global ACP client instance
+acp_client = ACPClient()
