@@ -1,231 +1,120 @@
-"""MCP (Model Context Protocol) server configuration.
+"""MCP configuration — reads real MCP server config from Kiro directories.
 
-Defines the MCP servers available to agents, including their tools and capabilities.
+MCP servers are defined in JSON files:
+  - ~/.kiro/settings/mcp.json    (global)
+  - .kiro/settings/mcp.json      (workspace-scoped)
+
+Format:
+{
+  "mcpServers": {
+    "server-name": {
+      "command": "command-to-run",
+      "args": ["arg1", "arg2"],
+      "env": {"KEY": "value"},
+      "disabled": false,
+      "autoApprove": ["tool1"],
+      "disabledTools": ["tool2"]
+    },
+    "remote-server": {
+      "url": "https://endpoint.example.com",
+      "headers": {"HEADER": "value"},
+      "disabled": false
+    }
+  }
+}
 """
 
+import json
 from dataclasses import dataclass, field
-
-
-@dataclass
-class MCPTool:
-    """A tool provided by an MCP server."""
-
-    name: str
-    description: str
-    parameters: list[str] = field(default_factory=list)
+from pathlib import Path
 
 
 @dataclass
 class MCPServer:
-    """An MCP server configuration."""
+    """An MCP server parsed from mcp.json."""
 
     id: str
     name: str
-    description: str
-    icon: str
     transport: str  # "stdio" or "http"
-    command: str  # The command to start the server
-    tools: list[MCPTool] = field(default_factory=list)
-    status: str = "available"  # "available", "connected", "error"
-    agents: list[str] = field(default_factory=list)  # Which agents use this server
+    command: str = ""  # For stdio servers
+    args: list[str] = field(default_factory=list)
+    url: str = ""  # For HTTP/SSE servers
+    env: dict[str, str] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=dict)
+    disabled: bool = False
+    auto_approve: list[str] = field(default_factory=list)
+    disabled_tools: list[str] = field(default_factory=list)
+    scope: str = "global"  # "global" or "workspace"
 
 
-# Pre-configured MCP servers
-MCP_SERVERS: dict[str, MCPServer] = {
-    "filesystem": MCPServer(
-        id="filesystem",
-        name="Filesystem",
-        description="Read, write, and manage files in the workspace. Provides tools for file operations, directory listing, and content search.",
-        icon="📁",
-        transport="stdio",
-        command="mcp-server-filesystem",
-        tools=[
-            MCPTool(
-                name="read_file",
-                description="Read the contents of a file",
-                parameters=["path"],
-            ),
-            MCPTool(
-                name="write_file",
-                description="Write content to a file (create or overwrite)",
-                parameters=["path", "content"],
-            ),
-            MCPTool(
-                name="list_directory",
-                description="List files and directories at a given path",
-                parameters=["path"],
-            ),
-            MCPTool(
-                name="search_files",
-                description="Search for files matching a pattern",
-                parameters=["pattern", "path"],
-            ),
-            MCPTool(
-                name="get_file_info",
-                description="Get metadata about a file (size, modified date, etc.)",
-                parameters=["path"],
-            ),
-        ],
-        agents=["auto", "code-review", "architect", "debugger", "test-writer", "docs-writer", "devops"],
-    ),
-    "github": MCPServer(
-        id="github",
-        name="GitHub",
-        description="Interact with GitHub repositories — create PRs, manage issues, review code, and access repo metadata.",
-        icon="🐙",
-        transport="stdio",
-        command="mcp-server-github",
-        tools=[
-            MCPTool(
-                name="create_pull_request",
-                description="Create a new pull request",
-                parameters=["title", "body", "head", "base"],
-            ),
-            MCPTool(
-                name="list_issues",
-                description="List issues in a repository",
-                parameters=["state", "labels"],
-            ),
-            MCPTool(
-                name="create_issue",
-                description="Create a new issue",
-                parameters=["title", "body", "labels"],
-            ),
-            MCPTool(
-                name="get_file_contents",
-                description="Get file contents from a repository",
-                parameters=["path", "ref"],
-            ),
-            MCPTool(
-                name="push_files",
-                description="Push file changes to a branch",
-                parameters=["branch", "files", "message"],
-            ),
-        ],
-        agents=["auto", "code-review"],
-    ),
-    "shell": MCPServer(
-        id="shell",
-        name="Shell",
-        description="Execute shell commands in the workspace. Run builds, tests, linters, and other CLI tools.",
-        icon="🖥️",
-        transport="stdio",
-        command="mcp-server-shell",
-        tools=[
-            MCPTool(
-                name="execute_command",
-                description="Execute a shell command and return output",
-                parameters=["command", "cwd", "timeout"],
-            ),
-            MCPTool(
-                name="background_process",
-                description="Start a long-running process in the background",
-                parameters=["command", "cwd"],
-            ),
-            MCPTool(
-                name="kill_process",
-                description="Kill a running background process",
-                parameters=["pid"],
-            ),
-        ],
-        agents=["debugger", "test-writer", "devops"],
-    ),
-    "docker": MCPServer(
-        id="docker",
-        name="Docker",
-        description="Manage Docker containers, images, and compose stacks. Build, run, and inspect containers.",
-        icon="🐳",
-        transport="stdio",
-        command="mcp-server-docker",
-        tools=[
-            MCPTool(
-                name="build_image",
-                description="Build a Docker image from a Dockerfile",
-                parameters=["dockerfile", "tag", "context"],
-            ),
-            MCPTool(
-                name="run_container",
-                description="Run a Docker container",
-                parameters=["image", "ports", "volumes", "env"],
-            ),
-            MCPTool(
-                name="list_containers",
-                description="List running containers",
-                parameters=["all"],
-            ),
-            MCPTool(
-                name="container_logs",
-                description="Get logs from a container",
-                parameters=["container_id", "tail"],
-            ),
-            MCPTool(
-                name="compose_up",
-                description="Start services defined in docker-compose.yml",
-                parameters=["file", "services"],
-            ),
-        ],
-        agents=["devops"],
-    ),
-    "web-search": MCPServer(
-        id="web-search",
-        name="Web Search",
-        description="Search the web for documentation, solutions, and current information about libraries and APIs.",
-        icon="🔍",
-        transport="stdio",
-        command="mcp-server-web-search",
-        tools=[
-            MCPTool(
-                name="search",
-                description="Search the web for information",
-                parameters=["query"],
-            ),
-            MCPTool(
-                name="fetch_page",
-                description="Fetch and extract content from a URL",
-                parameters=["url"],
-            ),
-        ],
-        agents=["auto", "architect"],
-    ),
-    "postgres": MCPServer(
-        id="postgres",
-        name="PostgreSQL",
-        description="Connect to PostgreSQL databases. Run queries, inspect schemas, and manage migrations.",
-        icon="🐘",
-        transport="stdio",
-        command="mcp-server-postgres",
-        tools=[
-            MCPTool(
-                name="query",
-                description="Execute a SQL query",
-                parameters=["sql", "params"],
-            ),
-            MCPTool(
-                name="list_tables",
-                description="List all tables in the database",
-                parameters=[],
-            ),
-            MCPTool(
-                name="describe_table",
-                description="Get table schema (columns, types, constraints)",
-                parameters=["table_name"],
-            ),
-        ],
-        agents=[],
-    ),
-}
+def _parse_mcp_json(file_path: Path, scope: str) -> list[MCPServer]:
+    """Parse an mcp.json file and return MCPServer objects."""
+    servers = []
+
+    if not file_path.exists():
+        return servers
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return servers
+
+    mcp_servers = data.get("mcpServers", {})
+
+    for server_id, config in mcp_servers.items():
+        # Determine transport type
+        if "url" in config:
+            transport = "http"
+        else:
+            transport = "stdio"
+
+        command = config.get("command", "")
+        args = config.get("args", [])
+
+        # Build display command
+        if command and args:
+            display_cmd = f"{command} {' '.join(args)}"
+        elif command:
+            display_cmd = command
+        else:
+            display_cmd = config.get("url", "")
+
+        server = MCPServer(
+            id=server_id,
+            name=server_id,
+            transport=transport,
+            command=display_cmd,
+            args=args,
+            url=config.get("url", ""),
+            env=config.get("env", {}),
+            headers=config.get("headers", {}),
+            disabled=config.get("disabled", False),
+            auto_approve=config.get("autoApprove", []),
+            disabled_tools=config.get("disabledTools", []),
+            scope=scope,
+        )
+        servers.append(server)
+
+    return servers
 
 
-def list_mcp_servers() -> list[MCPServer]:
-    """List all available MCP servers."""
-    return list(MCP_SERVERS.values())
+def load_mcp_servers(workspace_path: Path | None = None) -> list[MCPServer]:
+    """
+    Load all MCP servers from global and workspace config files.
 
+    Args:
+        workspace_path: Optional workspace path to also scan .kiro/settings/mcp.json
+    """
+    servers = []
 
-def get_mcp_server(server_id: str) -> MCPServer | None:
-    """Get an MCP server by ID."""
-    return MCP_SERVERS.get(server_id)
+    # Global: ~/.kiro/settings/mcp.json
+    global_file = Path.home() / ".kiro" / "settings" / "mcp.json"
+    servers.extend(_parse_mcp_json(global_file, "global"))
 
+    # Workspace: <workspace>/.kiro/settings/mcp.json
+    if workspace_path:
+        ws_file = workspace_path / ".kiro" / "settings" / "mcp.json"
+        servers.extend(_parse_mcp_json(ws_file, "workspace"))
 
-def get_servers_for_agent(agent_id: str) -> list[MCPServer]:
-    """Get all MCP servers available to a specific agent."""
-    return [s for s in MCP_SERVERS.values() if agent_id in s.agents]
+    return servers

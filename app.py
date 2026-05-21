@@ -16,7 +16,7 @@ import time
 import streamlit as st
 
 from src.agent import ACPClient, AgentStatus, acp_client
-from src.agents_config import list_agents, get_agent
+from src.agents_config import load_agents, get_agent
 from src.auth import AuthManager
 from src.config import config
 from src.workspace import WorkspaceManager
@@ -34,32 +34,6 @@ st.markdown(
     """
 <style>
     .stApp { background-color: #1a1a2e; }
-    .agent-card {
-        background-color: #2d2d44;
-        border-radius: 10px;
-        padding: 12px 14px;
-        margin: 6px 0;
-        border: 1px solid #3d3d5c;
-        cursor: pointer;
-    }
-    .agent-card-selected {
-        background-color: #2d2d44;
-        border-radius: 10px;
-        padding: 12px 14px;
-        margin: 6px 0;
-        border: 2px solid #6366f1;
-    }
-    .status-dot {
-        display: inline-block;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        margin-right: 6px;
-    }
-    .status-connected { background-color: #22c55e; }
-    .status-disconnected { background-color: #6b7280; }
-    .status-running { background-color: #eab308; }
-    .status-error { background-color: #ef4444; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -80,7 +54,7 @@ def init_session_state():
         "workspace": None,
         "messages": [],
         "acp_connected": False,
-        "selected_agent": "auto",
+        "selected_agent": None,
         "show_register": False,
     }
     for key, value in defaults.items():
@@ -187,35 +161,54 @@ def render_sidebar():
 
         st.markdown("---")
 
-        # Agent selection
+        # Agent selection — read from real ~/.kiro/agents/
         st.markdown("#### Select Agent")
-        agents = list_agents()
 
-        for agent in agents:
-            is_selected = st.session_state.selected_agent == agent.id
-            card_class = "agent-card-selected" if is_selected else "agent-card"
+        workspace_path = None
+        if st.session_state.workspace:
+            workspace_path = st.session_state.workspace.path
 
-            if st.button(
-                f"{agent.icon} {agent.name}",
-                key=f"agent_{agent.id}",
-                use_container_width=True,
-                type="primary" if is_selected else "secondary",
-            ):
-                if st.session_state.selected_agent != agent.id:
-                    st.session_state.selected_agent = agent.id
-                    # Close current ACP session when switching agents
-                    conn = acp_client.get_connection(st.session_state.username)
-                    if conn:
-                        acp_client.close_session(conn)
-                    st.session_state.messages = []
-                    st.session_state.acp_connected = False
-                    st.rerun()
+        agents = load_agents(workspace_path)
 
-        # Show selected agent details
-        selected = get_agent(st.session_state.selected_agent)
-        if selected:
-            st.markdown("---")
-            st.caption(selected.description)
+        if not agents:
+            st.caption(
+                "No agents found.\n\n"
+                "Add agents to `~/.kiro/agents/` (JSON or .md files)."
+            )
+        else:
+            for agent in agents:
+                is_selected = st.session_state.selected_agent == agent.id
+                label = f"{agent.name}"
+                if agent.description:
+                    label += f" — {agent.description[:40]}"
+
+                if st.button(
+                    label,
+                    key=f"agent_{agent.id}",
+                    use_container_width=True,
+                    type="primary" if is_selected else "secondary",
+                ):
+                    if st.session_state.selected_agent != agent.id:
+                        st.session_state.selected_agent = agent.id
+                        # Close current ACP session when switching agents
+                        conn = acp_client.get_connection(st.session_state.username)
+                        if conn:
+                            acp_client.close_session(conn)
+                        st.session_state.messages = []
+                        st.session_state.acp_connected = False
+                        st.rerun()
+
+            # Show selected agent info
+            if st.session_state.selected_agent:
+                selected = get_agent(st.session_state.selected_agent, workspace_path)
+                if selected:
+                    st.markdown("---")
+                    st.caption(f"**{selected.name}**")
+                    if selected.description:
+                        st.caption(selected.description)
+                    if selected.tools:
+                        st.caption(f"Tools: `{'`, `'.join(selected.tools)}`")
+                    st.caption(f"Scope: {selected.scope}")
 
         st.markdown("---")
 
@@ -265,9 +258,17 @@ def render_sidebar():
 
 def render_chat():
     """Render the main chat interface."""
-    selected = get_agent(st.session_state.selected_agent)
-    agent_label = f"{selected.icon} {selected.name}" if selected else "🤖 Agent"
-    st.markdown(f"### {agent_label}")
+    # Header
+    selected_agent = None
+    if st.session_state.selected_agent:
+        workspace_path = st.session_state.workspace.path if st.session_state.workspace else None
+        selected_agent = get_agent(st.session_state.selected_agent, workspace_path)
+
+    if selected_agent:
+        st.markdown(f"### 🤖 {selected_agent.name}")
+    else:
+        st.markdown("### 🤖 Kiro Agent")
+        st.caption("Select an agent from the sidebar to get started.")
 
     if not config.kiro_api_key:
         st.warning(
@@ -282,7 +283,7 @@ def render_chat():
                 with st.chat_message("user"):
                     st.markdown(msg["content"])
             else:
-                with st.chat_message("assistant", avatar=selected.icon if selected else "🤖"):
+                with st.chat_message("assistant", avatar="🤖"):
                     st.markdown(msg["content"])
 
     # Chat input
@@ -292,7 +293,7 @@ def render_chat():
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        with st.chat_message("assistant", avatar=selected.icon if selected else "🤖"):
+        with st.chat_message("assistant", avatar="🤖"):
             with st.spinner("Thinking..."):
                 response = execute_agent_prompt(prompt)
             st.markdown(response)
