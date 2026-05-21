@@ -129,6 +129,15 @@ class AgentManager:
         env = self._get_env()
 
         try:
+            # Verify kiro CLI exists before spawning
+            import shutil
+            kiro_path = shutil.which(config.kiro_cli_path)
+            if not kiro_path:
+                raise FileNotFoundError(
+                    f"'{config.kiro_cli_path}' not found in PATH. "
+                    f"PATH={env.get('PATH', 'not set')}"
+                )
+
             process = subprocess.Popen(
                 cmd,
                 cwd=str(workspace_path),
@@ -164,7 +173,7 @@ class AgentManager:
 
             return agent
 
-        except FileNotFoundError:
+        except FileNotFoundError as e:
             agent = AgentProcess(
                 process_id=process_id,
                 username=username,
@@ -176,7 +185,50 @@ class AgentManager:
             agent.messages.append(
                 AgentMessage(
                     role="assistant",
-                    content="Error: Kiro CLI not found. Please ensure 'kiro' is installed and in PATH.",
+                    content=f"Error: Kiro CLI not found.\n\nDetails: {e}\n\n"
+                    f"Please ensure 'kiro' is installed and available in PATH.\n"
+                    f"Set KIRO_CLI_PATH in .env if it's in a custom location.",
+                )
+            )
+            with self._lock:
+                self._processes[process_id] = agent
+            return agent
+
+        except PermissionError as e:
+            agent = AgentProcess(
+                process_id=process_id,
+                username=username,
+                session_id=session_id,
+                workspace_path=workspace_path,
+                mode=mode,
+                status=AgentStatus.ERROR,
+            )
+            agent.messages.append(
+                AgentMessage(
+                    role="assistant",
+                    content=f"Error: Permission denied when running Kiro CLI.\n\nDetails: {e}\n\n"
+                    f"Try: `chmod +x $(which kiro)`",
+                )
+            )
+            with self._lock:
+                self._processes[process_id] = agent
+            return agent
+
+        except Exception as e:
+            agent = AgentProcess(
+                process_id=process_id,
+                username=username,
+                session_id=session_id,
+                workspace_path=workspace_path,
+                mode=mode,
+                status=AgentStatus.ERROR,
+            )
+            agent.messages.append(
+                AgentMessage(
+                    role="assistant",
+                    content=f"Error starting Kiro CLI agent.\n\nDetails: {type(e).__name__}: {e}\n\n"
+                    f"Command: `{' '.join(cmd)}`\n"
+                    f"Workspace: `{workspace_path}`",
                 )
             )
             with self._lock:

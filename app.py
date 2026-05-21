@@ -363,6 +363,12 @@ def execute_agent_prompt(prompt: str) -> str:
 
     st.session_state.agent_process_id = agent.process_id
 
+    # If agent errored immediately (e.g. CLI not found), show error message
+    if agent.status == AgentStatus.ERROR:
+        if agent.messages:
+            return agent.messages[-1].content
+        return "❌ Agent encountered an error during startup."
+
     # Wait for output (with timeout)
     output_lines = []
     timeout = 120  # 2 minutes max
@@ -376,6 +382,7 @@ def execute_agent_prompt(prompt: str) -> str:
         status = agent_manager.get_status(agent.process_id)
         if status in (AgentStatus.STOPPED, AgentStatus.ERROR):
             # Get any remaining output
+            time.sleep(0.3)  # Brief pause to allow final output to flush
             remaining = agent_manager.get_output(agent.process_id)
             output_lines.extend(remaining)
             break
@@ -383,8 +390,26 @@ def execute_agent_prompt(prompt: str) -> str:
         time.sleep(0.5)
 
     if not output_lines:
-        if agent.status == AgentStatus.ERROR:
-            return "❌ Agent encountered an error. Check that Kiro CLI is installed and configured."
+        # Try to get exit code for better diagnostics
+        exit_code = None
+        if agent._process:
+            exit_code = agent._process.poll()
+
+        if exit_code is not None and exit_code != 0:
+            return (
+                f"❌ Kiro CLI exited with code {exit_code}.\n\n"
+                f"**Possible causes:**\n"
+                f"- Invalid or expired `KIRO_API_KEY`\n"
+                f"- Kiro CLI version mismatch (need v2.0+ for headless mode)\n"
+                f"- Network connectivity issues\n\n"
+                f"**Debug command:**\n"
+                f"```bash\n"
+                f"KIRO_API_KEY=your_key kiro --no-interactive --trust-all-tools --prompt \"hi\"\n"
+                f"```"
+            )
+        elif agent.status == AgentStatus.ERROR:
+            return "❌ Agent encountered an error. Check Kiro CLI installation and API key."
+
         return "⏳ Agent is still processing. Results will appear shortly..."
 
     return "\n".join(output_lines)
