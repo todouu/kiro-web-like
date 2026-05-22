@@ -6,11 +6,22 @@ enableCORS = false
 enableXsrfProtection = true
 
 [theme]
-primaryColor = "#6366f1"
-backgroundColor = "#1a1a2e"
-secondaryBackgroundColor = "#2d2d44"
-textColor = "#e0e0e0"
+primaryColor = "#cb785c"
+backgroundColor = "#fdfdf8"
+secondaryBackgroundColor = "#ecebe3"
+textColor = "#3d3a2a"
+linkColor = "#3d3a2a"
+borderColor = "#d3d2ca"
+showWidgetBorder = true
+baseRadius = "0.75rem"
+buttonRadius = "full"
 font = "sans serif"
+codeBackgroundColor = "#ecebe4"
+showSidebarBorder = true
+
+[theme.sidebar]
+backgroundColor = "#f0f0ec"
+secondaryBackgroundColor = "#ecebe3"
 
 [browser]
 gatherUsageStats = false

@@ -5,16 +5,7 @@ from pathlib import Path
 
 from src.mcp_config import load_mcp_servers
 
-st.set_page_config(page_title="MCP — Kiro Web", page_icon="🔌", layout="wide")
-
-st.markdown(
-    """
-<style>
-    .stApp { background-color: #1a1a2e; }
-</style>
-""",
-    unsafe_allow_html=True,
-)
+st.markdown("", unsafe_allow_html=True)
 
 
 def render_server(server):

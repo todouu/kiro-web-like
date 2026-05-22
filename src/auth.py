@@ -33,8 +33,8 @@ class Session:
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
     agent_id: str = ""
-    title: str = ""  # First user message or "New Session"
-    messages: list = field(default_factory=list)
+    title: str = ""
+    acp_session_ids: dict = field(default_factory=dict)  # agent_id -> kiro-cli session_id
 
 
 class AuthManager:
@@ -127,7 +127,7 @@ class AuthManager:
             "last_active": session.last_active,
             "agent_id": session.agent_id,
             "title": session.title,
-            "messages": session.messages,
+            "acp_session_ids": session.acp_session_ids,
         }
         with open(session_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -148,7 +148,7 @@ class AuthManager:
                 last_active=data.get("last_active", 0),
                 agent_id=data.get("agent_id", ""),
                 title=data.get("title", ""),
-                messages=data.get("messages", []),
+                acp_session_ids=data.get("acp_session_ids", {}),
             )
         except (json.JSONDecodeError, OSError, KeyError):
             return None
@@ -171,13 +171,13 @@ class AuthManager:
                     last_active=data.get("last_active", 0),
                     agent_id=data.get("agent_id", ""),
                     title=data.get("title", ""),
-                    messages=data.get("messages", []),
+                    acp_session_ids=data.get("acp_session_ids", {}),
                 ))
             except (json.JSONDecodeError, OSError, KeyError):
                 continue
 
         # Sort by last_active, newest first
-        sessions.sort(key=lambda s: s.last_active, reverse=True)
+        sessions.sort(key=lambda s: s.created_at, reverse=True)
         return sessions
 
     def delete_session(self, username: str, session_id: str) -> bool:

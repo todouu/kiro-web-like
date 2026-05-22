@@ -5,18 +5,14 @@ from pathlib import Path
 
 from src.skills_config import load_skills, get_skill_content
 
-st.set_page_config(page_title="Skills — Kiro Web", page_icon="⚡", layout="wide")
-
 st.markdown(
     """
 <style>
-    .stApp { background-color: #1a1a2e; }
     .skill-card {
-        background-color: #2d2d44;
         border-radius: 12px;
         padding: 16px;
         margin: 8px 0;
-        border: 1px solid #3d3d5c;
+        border: 1px solid var(--border-color, #d3d2ca);
     }
 </style>
 """,
