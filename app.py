@@ -168,15 +168,8 @@ def render_sidebar():
         # Session actions
         username = st.session_state.username
 
-        if st.button("🗑️ Clear Chat", use_container_width=True):
-            conn = acp_client.get_connection(username)
-            if conn:
-                acp_client.close_session(conn)
-            st.session_state.messages = []
-            st.session_state.acp_connected = False
-            st.rerun()
-
-        if st.button("🔄 New Session", use_container_width=True):
+        if st.button("➕ New Session", use_container_width=True):
+            _save_current_session()
             acp_client.disconnect(username)
             session = auth_manager.create_session(st.session_state.username)
             workspace = workspace_manager.create_workspace(
@@ -186,14 +179,103 @@ def render_sidebar():
             st.session_state.workspace = workspace
             st.session_state.messages = []
             st.session_state.acp_connected = False
+            st.session_state.selected_agent = None
             st.rerun()
 
+        if st.button("🗑️ Clear Chat", use_container_width=True):
+            conn = acp_client.get_connection(username)
+            if conn:
+                acp_client.close_session(conn)
+            st.session_state.messages = []
+            st.session_state.acp_connected = False
+            _save_current_session()
+            st.rerun()
+
+        st.markdown("---")
+
+        # Session history list
+        st.markdown("#### 📋 Sessions")
+        sessions = auth_manager.list_sessions(username)
+
+        if not sessions:
+            st.caption("No previous sessions")
+        else:
+            current_session_id = (
+                st.session_state.session.session_id if st.session_state.session else None
+            )
+
+            for sess in sessions[:20]:  # Show last 20 sessions
+                # Build label
+                title = sess.title or "New Session"
+                if len(title) > 35:
+                    title = title[:35] + "..."
+
+                # Time display
+                from datetime import datetime
+                dt = datetime.fromtimestamp(sess.last_active)
+                time_str = dt.strftime("%m/%d %H:%M")
+
+                is_current = sess.session_id == current_session_id
+                label = f"{'▶ ' if is_current else ''}{title}"
+
+                if st.button(
+                    label,
+                    key=f"sess_{sess.session_id}",
+                    use_container_width=True,
+                    type="primary" if is_current else "secondary",
+                    help=f"{time_str} · {len(sess.messages)} messages",
+                ):
+                    if not is_current:
+                        _switch_to_session(sess)
+
+        st.markdown("---")
+
         if st.button("🚪 Sign Out", use_container_width=True):
+            _save_current_session()
             acp_client.disconnect(username)
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             init_session_state()
             st.rerun()
+
+
+def _save_current_session():
+    """Save current session messages to disk."""
+    if st.session_state.session and st.session_state.messages:
+        session = st.session_state.session
+        session.messages = st.session_state.messages
+        session.last_active = time.time()
+        session.agent_id = st.session_state.selected_agent or ""
+        # Set title from first user message
+        if not session.title:
+            for msg in st.session_state.messages:
+                if msg["role"] == "user":
+                    session.title = msg["content"][:60]
+                    break
+        auth_manager.save_session(session)
+
+
+def _switch_to_session(sess):
+    """Switch to an existing session."""
+    _save_current_session()
+    username = st.session_state.username
+
+    # Disconnect current ACP
+    acp_client.disconnect(username)
+
+    # Load the session
+    loaded = auth_manager.load_session(username, sess.session_id)
+    if loaded:
+        workspace = workspace_manager.get_workspace(username, loaded.session_id)
+        if not workspace:
+            workspace = workspace_manager.create_workspace(username, loaded.session_id)
+
+        st.session_state.session = loaded
+        st.session_state.workspace = workspace
+        st.session_state.messages = loaded.messages
+        st.session_state.selected_agent = loaded.agent_id or None
+        st.session_state.acp_connected = False
+        st.rerun()
 
 
 def render_chat():
@@ -228,6 +310,7 @@ def render_chat():
             st.markdown(response)
 
         st.session_state.messages.append({"role": "assistant", "content": response})
+        _save_current_session()
         st.rerun()
 
     # --- Bottom bar: [Agent dropdown] [Status] [Description] — all in one row ---
