@@ -4,13 +4,14 @@ version = "0.1.0"
 description = "A Kiro Web-like interface powered by Streamlit frontend and Kiro CLI headless agents"
 requires-python = ">=3.11"
 dependencies = [
-    "streamlit>=1.40.0",
+    "streamlit>=1.45.0",
     "streamlit-authenticator>=0.4.1",
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
     "gitpython>=3.1.40",
     "psutil>=5.9.0",
     "bcrypt>=4.0.0",
+    "agent-client-protocol>=0.10.0",
 ]
 
 [project.optional-dependencies]
