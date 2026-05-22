@@ -339,6 +339,11 @@ class ACPClient:
                 "capabilities": {},
             })
             logger.info(f"ACP initialized for {username}: {init_result}")
+
+            # Send 'initialized' notification to complete the handshake
+            self._send_notification(conn, "initialized")
+            logger.info("Sent 'initialized' notification")
+
             conn.status = AgentStatus.IDLE
         except Exception as e:
             # Try to read stderr for more info
