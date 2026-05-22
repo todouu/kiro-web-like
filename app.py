@@ -357,36 +357,16 @@ def render_chat():
         st.rerun()
 
 
-def ensure_acp_connection():
-    """Ensure the ACP connection is established for the current user."""
-    username = st.session_state.username
-    workspace_path = st.session_state.workspace.path
-
-    conn = acp_client.get_connection(username)
-    if conn and conn.status in (AgentStatus.IDLE, AgentStatus.RUNNING):
-        return conn
-
-    # connect() now also creates an initial session
-    conn = acp_client.connect(username, workspace_path)
-    st.session_state.acp_connected = True
-    return conn
-
-
 def execute_agent_prompt(prompt: str) -> str:
     """Execute a prompt via Kiro CLI ACP protocol with the selected agent."""
-    if not config.kiro_api_key:
-        return (
-            "⚠️ **Agent not configured.**\n\n"
-            "Please set `KIRO_API_KEY` in your `.env` file.\n\n"
-            "```bash\nexport KIRO_API_KEY=your_api_key_here\n```"
-        )
-
     if not st.session_state.workspace:
         return "❌ No workspace available. Please create a new session."
 
+    username = st.session_state.username
+    workspace_path = st.session_state.workspace.path
+
     try:
-        conn = ensure_acp_connection()
-        response = acp_client.prompt(conn, prompt)
+        response = acp_client.prompt(username, workspace_path, prompt)
         return response
 
     except FileNotFoundError as e:
@@ -397,7 +377,6 @@ def execute_agent_prompt(prompt: str) -> str:
         )
 
     except ConnectionError as e:
-        st.session_state.acp_connected = False
         return f"❌ **Connection lost**\n\n{e}\n\nTry sending another message to reconnect."
 
     except TimeoutError:
@@ -406,7 +385,7 @@ def execute_agent_prompt(prompt: str) -> str:
     except RuntimeError as e:
         return (
             f"❌ **Agent error**\n\n{e}\n\n"
-            f"Check: valid KIRO_API_KEY, Kiro CLI v1.25+, `kiro-cli acp` works."
+            f"Check: Kiro CLI v1.25+, `kiro-cli acp` works, logged in via `kiro-cli login`."
         )
 
     except Exception as e:
