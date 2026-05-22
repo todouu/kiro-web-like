@@ -12,6 +12,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -22,6 +23,12 @@ from typing import Any
 
 from src.config import config
 
+# Configure logging to output to stderr (visible in streamlit terminal)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stderr,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -99,6 +106,8 @@ class ACPClient:
                 if not line:
                     continue
 
+                logger.debug(f"ACP stdout: {line[:200]}")
+
                 try:
                     msg = json.loads(line)
                 except json.JSONDecodeError:
@@ -114,10 +123,21 @@ class ACPClient:
                 else:
                     logger.debug(f"Unknown ACP message: {msg}")
 
-        except (ValueError, OSError):
-            pass  # Process closed
+        except (ValueError, OSError) as e:
+            logger.warning(f"ACP reader loop ended: {e}")
         finally:
             conn.status = AgentStatus.STOPPED
+            logger.info(f"ACP reader loop finished for {conn.username}")
+
+    def _stderr_loop(self, conn: ACPConnection):
+        """Background thread: read stderr from the ACP process and log it."""
+        try:
+            if conn.process.stderr:
+                for line in iter(conn.process.stderr.readline, ""):
+                    if line.strip():
+                        logger.info(f"ACP stderr [{conn.username}]: {line.rstrip()}")
+        except (ValueError, OSError):
+            pass
 
     def _send_request(self, conn: ACPConnection, method: str, params: dict | None = None) -> dict:
         """Send a JSON-RPC request and wait for the response."""
@@ -257,6 +277,10 @@ class ACPClient:
         cmd = [config.kiro_cli_path, "acp"]
         env = self._get_env()
 
+        logger.info(f"Starting ACP process: {' '.join(cmd)}")
+        logger.info(f"Working directory: {workspace_path}")
+        logger.info(f"KIRO_API_KEY set: {'yes' if env.get('KIRO_API_KEY') else 'NO'}")
+
         try:
             process = subprocess.Popen(
                 cmd,
@@ -282,16 +306,30 @@ class ACPClient:
         reader.start()
         conn._reader_thread = reader
 
+        # Start stderr reader thread for logging
+        stderr_reader = threading.Thread(
+            target=self._stderr_loop, args=(conn,), daemon=True
+        )
+        stderr_reader.start()
+
         # Give the process a moment to start
-        time.sleep(0.5)
+        time.sleep(1.0)
 
         # Check if process died immediately
         if process.poll() is not None:
             stderr_output = process.stderr.read() if process.stderr else ""
+            logger.error(
+                f"kiro-cli acp exited immediately (code {process.returncode}). "
+                f"stderr: {stderr_output[:1000]}"
+            )
             raise RuntimeError(
                 f"kiro-cli acp exited immediately (code {process.returncode}).\n"
-                f"stderr: {stderr_output[:500]}"
+                f"stderr: {stderr_output[:500]}\n\n"
+                f"Command: {' '.join(cmd)}\n"
+                f"Try running manually: KIRO_API_KEY=xxx kiro-cli acp"
             )
+
+        logger.info(f"ACP process started (PID {process.pid}), sending initialize...")
 
         # Send initialize handshake
         try:
@@ -306,8 +344,19 @@ class ACPClient:
             logger.info(f"ACP initialized for {username}: {init_result}")
             conn.status = AgentStatus.IDLE
         except Exception as e:
+            # Try to read stderr for more info
+            stderr_output = ""
+            try:
+                if process.stderr:
+                    stderr_output = process.stderr.read()
+            except Exception:
+                pass
+            logger.error(f"ACP initialization failed: {e}. stderr: {stderr_output[:500]}")
             self._kill(conn)
-            raise RuntimeError(f"ACP initialization failed: {e}")
+            raise RuntimeError(
+                f"ACP initialization failed: {e}\n"
+                f"stderr: {stderr_output[:500]}"
+            )
 
         with self._lock:
             self._connections[username] = conn
