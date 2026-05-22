@@ -34,6 +34,10 @@ st.markdown(
     """
 <style>
     .stApp { background-color: #1a1a2e; }
+    /* Make the agent dropdown compact and inline-feeling */
+    [data-testid="stSelectbox"][aria-label="🤖"] {
+        max-width: 200px;
+    }
 </style>
 """,
     unsafe_allow_html=True,
@@ -215,8 +219,7 @@ def render_sidebar():
 
 
 def render_chat():
-    """Render the main chat interface with agent dropdown below."""
-    st.markdown("### 🤖 Kiro Agent")
+    """Render the main chat interface with inline agent selector."""
 
     if not config.kiro_api_key:
         st.warning(
@@ -234,7 +237,46 @@ def render_chat():
                 with st.chat_message("assistant", avatar="🤖"):
                     st.markdown(msg["content"])
 
-    # Chat input
+    # --- Input area: agent dropdown (small) + chat input on the same row ---
+    # Load agents
+    workspace_path = None
+    if st.session_state.workspace:
+        workspace_path = st.session_state.workspace.path
+    agents = load_agents(workspace_path)
+
+    # Agent selector inline — compact dropdown above the chat input
+    if agents:
+        agent_ids = [a.id for a in agents]
+        agent_labels = [a.name for a in agents]
+
+        current_index = 0
+        if st.session_state.selected_agent and st.session_state.selected_agent in agent_ids:
+            current_index = agent_ids.index(st.session_state.selected_agent)
+
+        selected_label = st.selectbox(
+            "🤖",
+            options=agent_labels,
+            index=current_index,
+            key="agent_dropdown",
+            label_visibility="collapsed",
+        )
+
+        # Handle agent change
+        selected_idx = agent_labels.index(selected_label)
+        new_agent_id = agent_ids[selected_idx]
+
+        if new_agent_id != st.session_state.selected_agent:
+            st.session_state.selected_agent = new_agent_id
+            conn = acp_client.get_connection(st.session_state.username)
+            if conn:
+                acp_client.close_session(conn)
+            st.session_state.messages = []
+            st.session_state.acp_connected = False
+            st.rerun()
+    else:
+        st.caption("No agents found. Add `.json` files to `~/.kiro/agents/`.")
+
+    # Chat input (Streamlit pins this to the bottom)
     if prompt := st.chat_input("Describe what you need..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -248,52 +290,6 @@ def render_chat():
 
         st.session_state.messages.append({"role": "assistant", "content": response})
         st.rerun()
-
-    # --- Agent selector dropdown below the chat ---
-    st.markdown("---")
-
-    workspace_path = None
-    if st.session_state.workspace:
-        workspace_path = st.session_state.workspace.path
-
-    agents = load_agents(workspace_path)
-
-    if not agents:
-        st.caption(
-            "No agents found. Add agent files to `~/.kiro/agents/` (JSON or .md)."
-        )
-    else:
-        # Build options: id -> display name
-        agent_options = {a.id: a.name for a in agents}
-        agent_ids = list(agent_options.keys())
-        agent_labels = list(agent_options.values())
-
-        # Determine current selection index
-        current_index = 0
-        if st.session_state.selected_agent and st.session_state.selected_agent in agent_ids:
-            current_index = agent_ids.index(st.session_state.selected_agent)
-
-        selected_label = st.selectbox(
-            "Agent",
-            options=agent_labels,
-            index=current_index,
-            key="agent_dropdown",
-        )
-
-        # Map back to agent id
-        selected_idx = agent_labels.index(selected_label)
-        new_agent_id = agent_ids[selected_idx]
-
-        # Handle agent change
-        if new_agent_id != st.session_state.selected_agent:
-            st.session_state.selected_agent = new_agent_id
-            # Close current ACP session when switching agents
-            conn = acp_client.get_connection(st.session_state.username)
-            if conn:
-                acp_client.close_session(conn)
-            st.session_state.messages = []
-            st.session_state.acp_connected = False
-            st.rerun()
 
 
 def ensure_acp_connection():
