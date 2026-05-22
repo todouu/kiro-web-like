@@ -340,9 +340,10 @@ class ACPClient:
             })
             logger.info(f"ACP initialized for {username}: {init_result}")
 
-            # Send 'initialized' notification to complete the handshake
-            self._send_notification(conn, "initialized")
-            logger.info("Sent 'initialized' notification")
+            # Send 'notifications/initialized' to complete the handshake
+            # (required by ACP spec — agent waits for this before accepting sessions)
+            self._send_notification(conn, "notifications/initialized")
+            logger.info("Sent 'notifications/initialized' notification")
 
             conn.status = AgentStatus.IDLE
         except Exception as e:
