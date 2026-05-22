@@ -94,7 +94,7 @@ class ACPClient:
     def _get_env(self) -> dict:
         """Environment variables for the kiro-cli acp process."""
         env = os.environ.copy()
-        env["KIRO_API_KEY"] = config.kiro_api_key
+        # Don't set KIRO_API_KEY — ACP mode uses the CLI's own auth (social login)
         env["TERM"] = "dumb"
         env["NO_COLOR"] = "1"
         return env
