@@ -165,31 +165,9 @@ def render_sidebar():
 
         st.markdown("---")
 
-        # Agent status
-        username = st.session_state.username
-        status = acp_client.get_status(username)
-        status_map = {
-            AgentStatus.RUNNING: ("🟢", "Running"),
-            AgentStatus.IDLE: ("🔵", "Connected"),
-            AgentStatus.INITIALIZING: ("🟡", "Connecting..."),
-            AgentStatus.STOPPED: ("⚪", "Disconnected"),
-            AgentStatus.ERROR: ("🟠", "Error"),
-        }
-        icon, label = status_map.get(status, ("⚪", "Unknown"))
-        st.markdown(f"**Status:** {icon} {label}")
-
-        # Show selected agent info
-        if st.session_state.selected_agent:
-            workspace_path = st.session_state.workspace.path if st.session_state.workspace else None
-            selected = get_agent(st.session_state.selected_agent, workspace_path)
-            if selected:
-                st.caption(f"Agent: **{selected.name}**")
-                if selected.description:
-                    st.caption(selected.description)
-
-        st.markdown("---")
-
         # Session actions
+        username = st.session_state.username
+
         if st.button("🗑️ Clear Chat", use_container_width=True):
             conn = acp_client.get_connection(username)
             if conn:
@@ -237,45 +215,6 @@ def render_chat():
                 with st.chat_message("assistant", avatar="🤖"):
                     st.markdown(msg["content"])
 
-    # --- Input area: agent dropdown (small) + chat input on the same row ---
-    # Load agents
-    workspace_path = None
-    if st.session_state.workspace:
-        workspace_path = st.session_state.workspace.path
-    agents = load_agents(workspace_path)
-
-    # Agent selector inline — compact dropdown above the chat input
-    if agents:
-        agent_ids = [a.id for a in agents]
-        agent_labels = [a.name for a in agents]
-
-        current_index = 0
-        if st.session_state.selected_agent and st.session_state.selected_agent in agent_ids:
-            current_index = agent_ids.index(st.session_state.selected_agent)
-
-        selected_label = st.selectbox(
-            "🤖",
-            options=agent_labels,
-            index=current_index,
-            key="agent_dropdown",
-            label_visibility="collapsed",
-        )
-
-        # Handle agent change
-        selected_idx = agent_labels.index(selected_label)
-        new_agent_id = agent_ids[selected_idx]
-
-        if new_agent_id != st.session_state.selected_agent:
-            st.session_state.selected_agent = new_agent_id
-            conn = acp_client.get_connection(st.session_state.username)
-            if conn:
-                acp_client.close_session(conn)
-            st.session_state.messages = []
-            st.session_state.acp_connected = False
-            st.rerun()
-    else:
-        st.caption("No agents found. Add `.json` files to `~/.kiro/agents/`.")
-
     # Chat input (Streamlit pins this to the bottom)
     if prompt := st.chat_input("Describe what you need..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
@@ -290,6 +229,69 @@ def render_chat():
 
         st.session_state.messages.append({"role": "assistant", "content": response})
         st.rerun()
+
+    # --- Bottom bar: [Agent dropdown] [Status] [Description] — all in one row ---
+    workspace_path = None
+    if st.session_state.workspace:
+        workspace_path = st.session_state.workspace.path
+    agents = load_agents(workspace_path)
+
+    col_agent, col_status, col_desc = st.columns([1, 1, 3])
+
+    with col_agent:
+        if agents:
+            agent_ids = [a.id for a in agents]
+            agent_labels = [a.name for a in agents]
+
+            current_index = 0
+            if st.session_state.selected_agent and st.session_state.selected_agent in agent_ids:
+                current_index = agent_ids.index(st.session_state.selected_agent)
+
+            selected_label = st.selectbox(
+                "Agent",
+                options=agent_labels,
+                index=current_index,
+                key="agent_dropdown",
+                label_visibility="collapsed",
+            )
+
+            # Handle agent change
+            selected_idx = agent_labels.index(selected_label)
+            new_agent_id = agent_ids[selected_idx]
+
+            if new_agent_id != st.session_state.selected_agent:
+                st.session_state.selected_agent = new_agent_id
+                conn = acp_client.get_connection(st.session_state.username)
+                if conn:
+                    acp_client.close_session(conn)
+                st.session_state.messages = []
+                st.session_state.acp_connected = False
+                st.rerun()
+        else:
+            st.caption("No agents")
+
+    with col_status:
+        username = st.session_state.username
+        status = acp_client.get_status(username)
+        status_map = {
+            AgentStatus.RUNNING: ("🟢", "Running"),
+            AgentStatus.IDLE: ("🔵", "Connected"),
+            AgentStatus.INITIALIZING: ("🟡", "Connecting..."),
+            AgentStatus.STOPPED: ("⚪", "Disconnected"),
+            AgentStatus.ERROR: ("🟠", "Error"),
+        }
+        icon, label = status_map.get(status, ("⚪", "Unknown"))
+        st.markdown(f"{icon} {label}")
+
+    with col_desc:
+        if st.session_state.selected_agent and agents:
+            selected = get_agent(st.session_state.selected_agent, workspace_path)
+            if selected and selected.description:
+                st.caption(selected.description)
+            elif selected:
+                st.caption(f"Agent: {selected.name}")
+        else:
+            st.caption("Select an agent to get started")
 
 
 def ensure_acp_connection():
