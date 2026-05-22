@@ -157,16 +157,75 @@ def render_register_form():
 
 # --- Main Application ---
 def render_sidebar():
-    """Render the application sidebar (user info + session controls)."""
+    """Render the application sidebar (user info + agent + sessions)."""
     with st.sidebar:
+        username = st.session_state.username
+
         # User info
         st.markdown(f"### 👤 {st.session_state.user.display_name}")
-        st.caption(f"@{st.session_state.username}")
+        st.caption(f"@{username}")
 
         st.markdown("---")
 
-        # Session actions
-        username = st.session_state.username
+        # Agent info
+        st.markdown("#### 🤖 Agent")
+        workspace_path = None
+        if st.session_state.workspace:
+            workspace_path = st.session_state.workspace.path
+        agents = load_agents(workspace_path)
+
+        if agents:
+            agent_ids = [a.id for a in agents]
+            agent_labels = [a.name for a in agents]
+
+            current_index = 0
+            if st.session_state.selected_agent and st.session_state.selected_agent in agent_ids:
+                current_index = agent_ids.index(st.session_state.selected_agent)
+
+            selected_label = st.selectbox(
+                "Agent",
+                options=agent_labels,
+                index=current_index,
+                key="agent_dropdown",
+                label_visibility="collapsed",
+            )
+
+            selected_idx = agent_labels.index(selected_label)
+            new_agent_id = agent_ids[selected_idx]
+
+            if new_agent_id != st.session_state.selected_agent:
+                st.session_state.selected_agent = new_agent_id
+                conn = acp_client.get_connection(username)
+                if conn:
+                    acp_client.close_session(conn)
+                st.session_state.messages = []
+                st.session_state.acp_connected = False
+                st.rerun()
+
+            # Agent description
+            if st.session_state.selected_agent:
+                selected = get_agent(st.session_state.selected_agent, workspace_path)
+                if selected and selected.description:
+                    st.caption(selected.description)
+
+            # Status
+            status = acp_client.get_status(username)
+            status_map = {
+                AgentStatus.RUNNING: ("🟢", "Running"),
+                AgentStatus.IDLE: ("🔵", "Connected"),
+                AgentStatus.INITIALIZING: ("🟡", "Connecting..."),
+                AgentStatus.STOPPED: ("⚪", "Disconnected"),
+                AgentStatus.ERROR: ("🟠", "Error"),
+            }
+            icon, label = status_map.get(status, ("⚪", "Unknown"))
+            st.caption(f"{icon} {label}")
+        else:
+            st.caption("No agents found. Add `.json` files to `~/.kiro/agents/`.")
+
+        st.markdown("---")
+
+        # Session list with New Session at top
+        st.markdown("#### 📋 Sessions")
 
         if st.button("➕ New Session", use_container_width=True):
             _save_current_session()
@@ -182,19 +241,6 @@ def render_sidebar():
             st.session_state.selected_agent = None
             st.rerun()
 
-        if st.button("🗑️ Clear Chat", use_container_width=True):
-            conn = acp_client.get_connection(username)
-            if conn:
-                acp_client.close_session(conn)
-            st.session_state.messages = []
-            st.session_state.acp_connected = False
-            _save_current_session()
-            st.rerun()
-
-        st.markdown("---")
-
-        # Session history list
-        st.markdown("#### 📋 Sessions")
         sessions = auth_manager.list_sessions(username)
 
         if not sessions:
@@ -204,13 +250,11 @@ def render_sidebar():
                 st.session_state.session.session_id if st.session_state.session else None
             )
 
-            for sess in sessions[:20]:  # Show last 20 sessions
-                # Build label
+            for sess in sessions[:20]:
                 title = sess.title or "New Session"
                 if len(title) > 35:
                     title = title[:35] + "..."
 
-                # Time display
                 from datetime import datetime
                 dt = datetime.fromtimestamp(sess.last_active)
                 time_str = dt.strftime("%m/%d %H:%M")
@@ -312,69 +356,6 @@ def render_chat():
         st.session_state.messages.append({"role": "assistant", "content": response})
         _save_current_session()
         st.rerun()
-
-    # --- Bottom bar: [Agent dropdown] [Status] [Description] — all in one row ---
-    workspace_path = None
-    if st.session_state.workspace:
-        workspace_path = st.session_state.workspace.path
-    agents = load_agents(workspace_path)
-
-    col_agent, col_status, col_desc = st.columns([1, 1, 3])
-
-    with col_agent:
-        if agents:
-            agent_ids = [a.id for a in agents]
-            agent_labels = [a.name for a in agents]
-
-            current_index = 0
-            if st.session_state.selected_agent and st.session_state.selected_agent in agent_ids:
-                current_index = agent_ids.index(st.session_state.selected_agent)
-
-            selected_label = st.selectbox(
-                "Agent",
-                options=agent_labels,
-                index=current_index,
-                key="agent_dropdown",
-                label_visibility="collapsed",
-            )
-
-            # Handle agent change
-            selected_idx = agent_labels.index(selected_label)
-            new_agent_id = agent_ids[selected_idx]
-
-            if new_agent_id != st.session_state.selected_agent:
-                st.session_state.selected_agent = new_agent_id
-                conn = acp_client.get_connection(st.session_state.username)
-                if conn:
-                    acp_client.close_session(conn)
-                st.session_state.messages = []
-                st.session_state.acp_connected = False
-                st.rerun()
-        else:
-            st.caption("No agents")
-
-    with col_status:
-        username = st.session_state.username
-        status = acp_client.get_status(username)
-        status_map = {
-            AgentStatus.RUNNING: ("🟢", "Running"),
-            AgentStatus.IDLE: ("🔵", "Connected"),
-            AgentStatus.INITIALIZING: ("🟡", "Connecting..."),
-            AgentStatus.STOPPED: ("⚪", "Disconnected"),
-            AgentStatus.ERROR: ("🟠", "Error"),
-        }
-        icon, label = status_map.get(status, ("⚪", "Unknown"))
-        st.markdown(f"{icon} {label}")
-
-    with col_desc:
-        if st.session_state.selected_agent and agents:
-            selected = get_agent(st.session_state.selected_agent, workspace_path)
-            if selected and selected.description:
-                st.caption(selected.description)
-            elif selected:
-                st.caption(f"Agent: {selected.name}")
-        else:
-            st.caption("Select an agent to get started")
 
 
 def ensure_acp_connection():
