@@ -366,8 +366,8 @@ def ensure_acp_connection():
     if conn and conn.status in (AgentStatus.IDLE, AgentStatus.RUNNING):
         return conn
 
+    # connect() now also creates an initial session
     conn = acp_client.connect(username, workspace_path)
-    acp_client.new_session(conn)
     st.session_state.acp_connected = True
     return conn
 

@@ -331,7 +331,7 @@ class ACPClient:
         # Send initialize handshake
         try:
             init_result = self._send_request(conn, "initialize", {
-                "protocolVersion": "0.1",
+                "protocolVersion": 1,
                 "clientInfo": {
                     "name": "kiro-web-like",
                     "version": "0.1.0",
@@ -340,11 +340,8 @@ class ACPClient:
             })
             logger.info(f"ACP initialized for {username}: {init_result}")
 
-            # Send 'notifications/initialized' to complete the handshake
-            # (required by ACP spec — agent waits for this before accepting sessions)
-            self._send_notification(conn, "notifications/initialized")
-            logger.info("Sent 'notifications/initialized' notification")
-
+            # Immediately create a session to keep the connection alive
+            # (Kiro CLI ACP exits if no session is created after initialize)
             conn.status = AgentStatus.IDLE
         except Exception as e:
             # Try to read stderr for more info
@@ -363,6 +360,12 @@ class ACPClient:
 
         with self._lock:
             self._connections[username] = conn
+
+        # Create initial session immediately to keep process alive
+        try:
+            self.new_session(conn)
+        except Exception as e:
+            logger.warning(f"Failed to create initial session: {e}")
 
         return conn
 
