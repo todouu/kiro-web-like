@@ -157,18 +157,12 @@ def render_register_form():
 
 # --- Main Application ---
 def render_sidebar():
-    """Render the application sidebar (user info + agent + sessions)."""
+    """Render the application sidebar (agent + sessions + user at bottom)."""
     with st.sidebar:
         username = st.session_state.username
 
-        # User info
-        st.markdown(f"### 👤 {st.session_state.user.display_name}")
-        st.caption(f"@{username}")
-
-        st.markdown("---")
-
         # Agent info
-        st.markdown("#### 🤖 Agent")
+        st.markdown("#### 🤖 AGENT")
         workspace_path = None
         if st.session_state.workspace:
             workspace_path = st.session_state.workspace.path
@@ -225,7 +219,7 @@ def render_sidebar():
         st.markdown("---")
 
         # Session list with New Session at top
-        st.markdown("#### 📋 Sessions")
+        st.markdown("#### 📋 SESSIONS")
 
         if st.button("➕ New Session", use_container_width=True):
             _save_current_session()
@@ -274,13 +268,18 @@ def render_sidebar():
 
         st.markdown("---")
 
-        if st.button("🚪 Sign Out", use_container_width=True):
-            _save_current_session()
-            acp_client.disconnect(username)
-            for key in list(st.session_state.keys()):
-                del st.session_state[key]
-            init_session_state()
-            st.rerun()
+        # User info + Sign Out at the bottom
+        col_user, col_out = st.columns([3, 1])
+        with col_user:
+            st.caption(f"👤 {st.session_state.user.display_name} (@{username})")
+        with col_out:
+            if st.button("🚪", key="signout_btn", help="Sign Out"):
+                _save_current_session()
+                acp_client.disconnect(username)
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                init_session_state()
+                st.rerun()
 
 
 def _save_current_session():

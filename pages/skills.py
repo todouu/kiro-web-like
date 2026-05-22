@@ -23,7 +23,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown("# ⚡ Skills")
+st.markdown("# ⚡ SKILLS")
 st.markdown(
     "Skills are portable instruction packages from your Kiro configuration. "
     "They extend what the agent knows how to do."
@@ -59,7 +59,7 @@ else:
     workspace_skills = [s for s in skills if s.scope == "workspace"]
 
     if global_skills:
-        st.markdown("### 🌐 Global Skills")
+        st.markdown("### 🌐 GLOBAL SKILLS")
         st.caption(f"From `~/.kiro/skills/` — {len(global_skills)} skill(s)")
         st.markdown("")
 
@@ -74,7 +74,7 @@ else:
                     st.caption("(empty body)")
 
     if workspace_skills:
-        st.markdown("### 📁 Workspace Skills")
+        st.markdown("### 📁 WORKSPACE SKILLS")
         st.caption(f"From `.kiro/skills/` — {len(workspace_skills)} skill(s)")
         st.markdown("")
 

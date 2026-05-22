@@ -50,7 +50,7 @@ def render_server(server):
 
 
 # --- Page content ---
-st.markdown("# 🔌 MCP Servers")
+st.markdown("# 🔌 MCP SERVERS")
 st.markdown(
     "Model Context Protocol (MCP) servers provide tools that agents use to interact with "
     "external systems — filesystems, APIs, databases, and more."
@@ -89,7 +89,7 @@ else:
     workspace_servers = [s for s in servers if s.scope == "workspace"]
 
     if global_servers:
-        st.markdown("### 🌐 Global MCP Servers")
+        st.markdown("### 🌐 GLOBAL MCP SERVERS")
         st.caption(f"From `~/.kiro/settings/mcp.json` — {len(global_servers)} server(s)")
         st.markdown("")
 
@@ -97,7 +97,7 @@ else:
             render_server(server)
 
     if workspace_servers:
-        st.markdown("### 📁 Workspace MCP Servers")
+        st.markdown("### 📁 WORKSPACE MCP SERVERS")
         st.caption(f"From `.kiro/settings/mcp.json` — {len(workspace_servers)} server(s)")
         st.markdown("")
 
